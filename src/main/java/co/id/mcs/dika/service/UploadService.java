@@ -289,7 +289,7 @@ public class UploadService {
                 }
 
                 try {
-                    excelExtractorService.extractWithRules(processingFile, fileName, null, defaultAppReferenceId);
+                    excelExtractorService.extractWithRules(processingFile, fileName, null, defaultAppReferenceId, false);
                     java.time.LocalDateTime endTime = java.time.LocalDateTime.now();
                     log.warn("Successfully processed file: {} | End Time: {} | Duration: {} ms",
                             fileName, endTime, java.time.Duration.between(startTime, endTime).toMillis());

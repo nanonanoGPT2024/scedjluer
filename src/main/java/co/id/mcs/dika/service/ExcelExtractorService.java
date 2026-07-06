@@ -138,11 +138,16 @@ public class ExcelExtractorService {
     }
 
     public Map<String, Object> extractWithRules(java.io.File file, String fileName, String userId) {
-        return extractWithRules(file, fileName, userId, null);
+        return extractWithRules(file, fileName, userId, null, true);
     }
 
     public Map<String, Object> extractWithRules(java.io.File file, String fileName, String userId,
             String appReferenceId) {
+        return extractWithRules(file, fileName, userId, appReferenceId, true);
+    }
+
+    public Map<String, Object> extractWithRules(java.io.File file, String fileName, String userId,
+            String appReferenceId, boolean async) {
         boolean isLargeFile = file.length() > 10 * 1024 * 1024; // 10MB
         if (isLargeFile) {
             log.warn("Large file detected ({} bytes). Dropping indexes for faster bulk insert...", file.length());
@@ -158,7 +163,7 @@ public class ExcelExtractorService {
             Mapper mapperEntity = mappers.get(0);
             ExtractionConfig config = prepareExtractionConfig(mapperEntity);
 
-            return processStreamingExtraction(file, fileName, userId, mapperEntity, config, appReferenceId);
+            return processStreamingExtraction(file, fileName, userId, mapperEntity, config, appReferenceId, async);
         } catch (Exception e) {
             log.error("Data streaming error: {}", e.getMessage());
             log.error("Stack trace: ", e);
@@ -172,65 +177,137 @@ public class ExcelExtractorService {
     }
 
     private Map<String, Object> processStreamingExtraction(java.io.File file, String fileName, String userId,
-            Mapper mapperEntity, ExtractionConfig config, String appReferenceId) throws Exception {
+            Mapper mapperEntity, ExtractionConfig config, String appReferenceId, boolean async) throws Exception {
 
         ObjectMapper objectMapper = createObjectMapper();
         BatchContext context = new BatchContext(fileName, mapperEntity, namedParameterJdbcTemplate);
         context.appReferenceId = appReferenceId;
+
+        List<Map<String, Object>> allRowMaps = new ArrayList<>();
+        List<Map<String, Object>> previewData = new ArrayList<>();
+
+        // 1. Read all rows into memory (in-memory parsing is extremely fast)
+        ExcelExtractor.extract(file, fileName, new int[] { 0 }, 1, "A", config.mapperRules, map -> {
+            allRowMaps.add(map);
+            if (previewData.size() < 10) {
+                previewData.add(new HashMap<>(map));
+            }
+        });
+
+        if (allRowMaps.isEmpty()) {
+            return finalizeLoggingAndResponse(context, previewData, userId);
+        }
+
+        // 2. Pre-calculate duplicates against DB (fast check: ~50ms)
+        Set<String> custNosToCheck = new HashSet<>();
+        for (Map<String, Object> map : allRowMaps) {
+            if (map.containsKey("od")) {
+                Map<String, Object> odMap = (Map<String, Object>) map.get("od");
+                if (odMap != null) {
+                    Object cn = odMap.get("cust_no");
+                    if (cn != null && !cn.toString().isEmpty()) {
+                        custNosToCheck.add(cn.toString());
+                    }
+                }
+            }
+        }
+        Set<String> existingInDb = fetchExistingCustNos(custNosToCheck);
         Set<String> processedKeysInFile = new HashSet<>();
 
-        List<OrderData> currentOrderBatch = new ArrayList<>();
-        List<DataCustomerProfile> currentProfileBatch = new ArrayList<>();
-        List<CustomerAddress> currentAddressBatch = new ArrayList<>();
-        List<CustomerPhone> currentPhoneBatch = new ArrayList<>();
-        List<OrderDataDuplicate> currentDuplicateBatch = new ArrayList<>();
+        // 3. Pre-populate context statsMap in main thread for instant LogUpload insertion
+        for (Map<String, Object> map : allRowMaps) {
+            if (map.containsKey("od")) {
+                Map<String, Object> odMap = (Map<String, Object>) map.get("od");
+                if (odMap != null) {
+                    Object cn = odMap.get("cust_no");
+                    String custNo = cn != null ? cn.toString() : null;
+                    boolean isDuplicate = (custNo != null && !custNo.isEmpty()) &&
+                            (processedKeysInFile.contains(custNo) || existingInDb.contains(custNo));
 
-        List<Map<String, Object>> inputBuffer = new ArrayList<>();
-        List<Map<String, Object>> previewData = new ArrayList<>();
-        int batchSize = 1000;
-        int[] totalCount = { 0 };
+                    Object promoObj = odMap.get("promo");
+                    String promo = promoObj != null ? promoObj.toString() : null;
+                    String campaignCode = determineCampaignCode(context.fileName, promo);
 
-        try {
-            ExcelExtractor.extract(file, fileName, new int[] { 0 }, 1, "A", config.mapperRules, map -> {
-                inputBuffer.add(map);
-                totalCount[0]++;
+                    String statsKey = (campaignCode != null && !campaignCode.isEmpty()) ? campaignCode : "UNKNOWN";
+                    CampaignStats stats = context.statsMap.computeIfAbsent(statsKey, k -> new CampaignStats(k));
+                    stats.total++;
 
-                if (previewData.size() < 10) {
-                    previewData.add(new HashMap<>(map));
+                    if (custNo == null || custNo.isEmpty()) {
+                        stats.success++;
+                    } else if (isDuplicate) {
+                        stats.duplicate++;
+                    } else {
+                        processedKeysInFile.add(custNo);
+                        stats.success++;
+                    }
                 }
-
-                if (inputBuffer.size() >= batchSize) {
-                    processInputBuffer(inputBuffer, context, processedKeysInFile, objectMapper, config,
-                            currentProfileBatch, currentAddressBatch, currentPhoneBatch, currentOrderBatch,
-                            currentDuplicateBatch);
-                    inputBuffer.clear();
-                }
-            });
-
-            // Final Buffer
-            if (!inputBuffer.isEmpty()) {
-                processInputBuffer(inputBuffer, context, processedKeysInFile, objectMapper, config,
-                        currentProfileBatch, currentAddressBatch, currentPhoneBatch, currentOrderBatch,
-                        currentDuplicateBatch);
-                inputBuffer.clear();
-            }
-        } catch (Exception e) {
-            log.error("Streaming extraction stopped due to error: {}", e.getMessage());
-            // We still return what we've processed so far, or rethrow if it's a fatal DB
-            // error
-            if (e.getCause() instanceof org.springframework.dao.DataAccessException
-                    || e instanceof org.springframework.dao.DataAccessException) {
-                throw e;
             }
         }
 
-        return finalizeLoggingAndResponse(context, previewData, userId);
+        // 4. Save LogUpload in the main thread (takes ~5-10ms)
+        Map<String, Object> response = finalizeLoggingAndResponse(context, previewData, userId);
+
+        // 5. Build background context reusing same logIds but reset counts
+        Map<String, CampaignStats> bgStatsMap = new HashMap<>();
+        for (Map.Entry<String, CampaignStats> entry : context.statsMap.entrySet()) {
+            CampaignStats mainStats = entry.getValue();
+            CampaignStats bgStats = new CampaignStats(mainStats.campaignCode);
+            bgStats.logId = mainStats.logId; // Keep the same logId!
+            bgStatsMap.put(entry.getKey(), bgStats);
+        }
+
+        BatchContext bgContext = new BatchContext(fileName, mapperEntity, namedParameterJdbcTemplate);
+        bgContext.appReferenceId = appReferenceId;
+        bgContext.statsMap = bgStatsMap;
+
+        // Reset processedKeysInFile for the background insertion thread
+        processedKeysInFile.clear();
+
+        // 6. Run database inserts asynchronously
+        CompletableFuture.runAsync(() -> {
+            long bgStart = System.currentTimeMillis();
+            log.info("[BG-INSERT] Started background database insertion for {} rows...", allRowMaps.size());
+            try {
+                List<OrderData> currentOrderBatch = new ArrayList<>();
+                List<DataCustomerProfile> currentProfileBatch = new ArrayList<>();
+                List<CustomerAddress> currentAddressBatch = new ArrayList<>();
+                List<CustomerPhone> currentPhoneBatch = new ArrayList<>();
+                List<OrderDataDuplicate> currentDuplicateBatch = new ArrayList<>();
+
+                int batchSize = 1000;
+                List<Map<String, Object>> inputBuffer = new ArrayList<>();
+
+                for (Map<String, Object> map : allRowMaps) {
+                    inputBuffer.add(map);
+                    if (inputBuffer.size() >= batchSize) {
+                        processInputBuffer(inputBuffer, bgContext, processedKeysInFile, objectMapper, config,
+                                currentProfileBatch, currentAddressBatch, currentPhoneBatch, currentOrderBatch,
+                                currentDuplicateBatch, async);
+                        inputBuffer.clear();
+                    }
+                }
+
+                if (!inputBuffer.isEmpty()) {
+                    processInputBuffer(inputBuffer, bgContext, processedKeysInFile, objectMapper, config,
+                            currentProfileBatch, currentAddressBatch, currentPhoneBatch, currentOrderBatch,
+                            currentDuplicateBatch, async);
+                    inputBuffer.clear();
+                }
+                log.info("[BG-INSERT] Successfully finished background database insertion for {} rows in {} ms.",
+                        allRowMaps.size(), (System.currentTimeMillis() - bgStart));
+            } catch (Exception e) {
+                log.error("[BG-INSERT] Critical error during background database insertion", e);
+            }
+        }, ioExecutor);
+
+        // 7. Return response immediately!
+        return response;
     }
 
     private void processInputBuffer(List<Map<String, Object>> buffer, BatchContext context,
             Set<String> processedKeysInFile, ObjectMapper objectMapper, ExtractionConfig config,
             List<DataCustomerProfile> profiles, List<CustomerAddress> addresses, List<CustomerPhone> phones,
-            List<OrderData> orders, List<OrderDataDuplicate> duplicates) throws Exception {
+            List<OrderData> orders, List<OrderDataDuplicate> duplicates, boolean async) throws Exception {
 
         long startTotal = System.currentTimeMillis();
 
@@ -320,7 +397,7 @@ public class ExcelExtractorService {
 
         // 3. Flush to DB
         long startFlush = System.currentTimeMillis();
-        flushAllBatches(profiles, addresses, phones, orders, duplicates, context);
+        flushAllBatches(profiles, addresses, phones, orders, duplicates, context, async);
         long endFlush = System.currentTimeMillis();
         log.info("[PERF] DB Flush for {} orders, {} profiles took {} ms", orders.size(), profiles.size(),
                 (endFlush - startFlush));
@@ -745,7 +822,7 @@ public class ExcelExtractorService {
     }
 
     private void flushAllBatches(List<DataCustomerProfile> profiles, List<CustomerAddress> addresses,
-            List<CustomerPhone> phones, List<OrderData> orders, List<OrderDataDuplicate> duplicates, BatchContext ctx) {
+            List<CustomerPhone> phones, List<OrderData> orders, List<OrderDataDuplicate> duplicates, BatchContext ctx, boolean async) {
         TransactionTemplate transactionTemplate = new TransactionTemplate(transactionManager);
         try {
             // Collect logUploads before the transaction clears orders
@@ -818,62 +895,127 @@ public class ExcelExtractorService {
                         phoneMs.set(System.currentTimeMillis() - s);
                     }, ioExecutor);
 
-            // Phones MUST be committed before leads (leads JOINs on customer_phone)
-            try {
-                phoneFuture.join();
-            } catch (Exception e) {
-                log.error("Phone batch insertion failed: {}", e.getMessage());
-            }
+            // Spawn the background thread for details (Phones, Leads, Addresses)
+            final List<String> finalLogUploads = logUploads;
+            if (async) {
+                CompletableFuture.runAsync(() -> {
+                    long bgStart = System.currentTimeMillis();
+                    log.info("[BG-INSERT] Started background detail insertion for {} phones, {} addresses...",
+                            phoneBatch.size(), addrBatch.size());
+                    try {
+                        // 1. Wait for phones to complete
+                        phoneFuture.join();
 
-            // Phase 3: Leads — runs while addresses are still inserting in background
-            long leadsStart = System.currentTimeMillis();
-            if (!logUploads.isEmpty()) {
-                for (String logUpload : logUploads) {
-                    String leadSql = """
-                            INSERT INTO leads (
-                                id, source_id, cust_no, phone, customer_name, created_at,
-                                mock_call, campaign_id, status, app_reference_id,
-                                phone_id, phone_type, is_primary, customer_id
-                            )
-                            SELECT
-                                gen_random_uuid(),
-                                od.id,
-                                od.case_id::text,
-                                cph.phone_number,
-                                cp.name,
-                                NOW(),
-                                false,
-                                od.campaign_id,
-                                'NEW',
-                                od.app_reference_id,
-                                cph.id,
-                                cph.phone_type,
-                                cph.is_primary,
-                                cp.id
-                            FROM order_data od
-                            INNER JOIN data_customer_profile cp ON od.customer_id = cp.id
-                            INNER JOIN customer_phone cph ON od.customer_id = cph.customer_id
-                            WHERE od.log_upload = :logUpload
-                            """;
+                        // 2. Insert leads
+                        long leadsStart = System.currentTimeMillis();
+                        if (!finalLogUploads.isEmpty()) {
+                            for (String logUpload : finalLogUploads) {
+                                String leadSql = """
+                                        INSERT INTO leads (
+                                            id, source_id, cust_no, phone, customer_name, created_at,
+                                            mock_call, campaign_id, status, app_reference_id,
+                                            phone_id, phone_type, is_primary, customer_id
+                                        )
+                                        SELECT
+                                            gen_random_uuid(),
+                                            od.id,
+                                            od.case_id::text,
+                                            cph.phone_number,
+                                            cp.name,
+                                            NOW(),
+                                            false,
+                                            od.campaign_id,
+                                            'NEW',
+                                            od.app_reference_id,
+                                            cph.id,
+                                            cph.phone_type,
+                                            cph.is_primary,
+                                            cp.id
+                                        FROM order_data od
+                                        INNER JOIN data_customer_profile cp ON od.customer_id = cp.id
+                                        INNER JOIN customer_phone cph ON od.customer_id = cph.customer_id
+                                        WHERE od.log_upload = :logUpload
+                                        """;
 
-                    Map<String, Object> paramMap = new HashMap<>();
-                    paramMap.put("logUpload", logUpload);
-                    ctx.jdbcTemplate.update(leadSql, paramMap);
+                                Map<String, Object> paramMap = new HashMap<>();
+                                paramMap.put("logUpload", logUpload);
+                                ctx.jdbcTemplate.update(leadSql, paramMap);
+                            }
+                        }
+                        long leadsMs = System.currentTimeMillis() - leadsStart;
+
+                        // 3. Wait for addresses to complete
+                        addrFuture.join();
+
+                        log.info(
+                                "[BG-INSERT] Successfully finished background details insertion in {} ms. Phones: {}ms, Addresses: {}ms, Leads: {}ms",
+                                (System.currentTimeMillis() - bgStart), phoneMs.get(), addrMs.get(), leadsMs);
+                    } catch (Exception e) {
+                        log.error("[BG-INSERT] Background detail insertion failed", e);
+                    }
+                }, ioExecutor);
+            } else {
+                // Synchronous Mode (Scheduler) - block and wait for phone, address, and lead inserts
+                long bgStart = System.currentTimeMillis();
+                log.info("[SYNC-INSERT] Processing detail insertion for {} phones, {} addresses...",
+                        phoneBatch.size(), addrBatch.size());
+                try {
+                    // Wait for phone inserts to finish
+                    phoneFuture.join();
+
+                    // Insert leads
+                    long leadsStart = System.currentTimeMillis();
+                    if (!finalLogUploads.isEmpty()) {
+                        for (String logUpload : finalLogUploads) {
+                            String leadSql = """
+                                    INSERT INTO leads (
+                                        id, source_id, cust_no, phone, customer_name, created_at,
+                                        mock_call, campaign_id, status, app_reference_id,
+                                        phone_id, phone_type, is_primary, customer_id
+                                    )
+                                    SELECT
+                                        gen_random_uuid(),
+                                        od.id,
+                                        od.case_id::text,
+                                        cph.phone_number,
+                                        cp.name,
+                                        NOW(),
+                                        false,
+                                        od.campaign_id,
+                                        'NEW',
+                                        od.app_reference_id,
+                                        cph.id,
+                                        cph.phone_type,
+                                        cph.is_primary,
+                                        cp.id
+                                    FROM order_data od
+                                    INNER JOIN data_customer_profile cp ON od.customer_id = cp.id
+                                    INNER JOIN customer_phone cph ON od.customer_id = cph.customer_id
+                                    WHERE od.log_upload = :logUpload
+                                    """;
+
+                            Map<String, Object> paramMap = new HashMap<>();
+                            paramMap.put("logUpload", logUpload);
+                            ctx.jdbcTemplate.update(leadSql, paramMap);
+                        }
+                    }
+                    long leadsMs = System.currentTimeMillis() - leadsStart;
+
+                    // Wait for address inserts to finish
+                    addrFuture.join();
+
+                    log.info(
+                            "[SYNC-INSERT] Successfully finished details insertion in {} ms. Phones: {}ms, Addresses: {}ms, Leads: {}ms",
+                            (System.currentTimeMillis() - bgStart), phoneMs.get(), addrMs.get(), leadsMs);
+                } catch (Exception e) {
+                    log.error("[SYNC-INSERT] Detail insertion failed", e);
+                    throw e;
                 }
-            }
-            long leadsMs = System.currentTimeMillis() - leadsStart;
-
-            // Wait for addresses to finish (ran in parallel with phones + leads)
-            try {
-                addrFuture.join();
-            } catch (Exception e) {
-                log.error("Address batch insertion failed: {}", e.getMessage());
             }
 
             log.info(
-                    "[PERF-BATCH] Campaigns: {}ms, Profiles: {}ms, Orders: {}ms, Duplicates: {}ms, Phones(parallel): {}ms, Addresses(parallel): {}ms, Leads: {}ms",
-                    (t[1] - t[0]), (t[2] - t[1]), (t[3] - t[2]), (t[4] - t[3]),
-                    phoneMs.get(), addrMs.get(), leadsMs);
+                    "[PERF-BATCH-SYNC] Campaigns: {}ms, Profiles: {}ms, Orders: {}ms, Duplicates: {}ms",
+                    (t[1] - t[0]), (t[2] - t[1]), (t[3] - t[2]), (t[4] - t[3]));
         } finally {
             // CRITICAL: Always clear batches to prevent memory leaks/avalanche on failure
             profiles.clear();
