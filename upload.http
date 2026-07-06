@@ -1,0 +1,111 @@
+@baseUrl = http://localhost:8083
+@appReferenceId = 8dd79639-e0fa-45fc-89b3-89372505bf57
+@userId = admin-user
+
+### 1. Upload Data (Multipart Form Data)
+# Process campaign/order file upload
+POST {{baseUrl}}/api/v1/upload/data
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+user-id: {{userId}}
+app-reference-id: {{appReferenceId}}
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="sample.csv"
+Content-Type: text/csv
+
+< ./db/mapper.sql
+--WebAppBoundary--
+
+
+### 2. Trigger Auto Upload (Manual Trigger)
+# Triggers processing of files in the auto upload folder
+GET {{baseUrl}}/api/v1/upload/trigger-auto
+
+
+### 3. Upload File to Auto Folder
+POST {{baseUrl}}/api/v1/upload/trigger-auto
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="auto-file.csv"
+Content-Type: text/csv
+
+< ./db/mapper.sql
+--WebAppBoundary--
+
+
+### 4. Trigger Auto Update (Manual Trigger)
+# Note the endpoint mapping spelling in the code: 'triger-update'
+GET {{baseUrl}}/api/v1/upload/triger-update
+
+
+### 5. Upload File to Update Folder
+POST {{baseUrl}}/api/v1/upload/trigger-update
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="update-file.csv"
+Content-Type: text/csv
+
+< ./db/mapper.sql
+--WebAppBoundary--
+
+
+### 6. Trigger Auto Submit (Manual Trigger)
+GET {{baseUrl}}/api/v1/upload/trigger-submit
+
+
+### 7. Upload File to Submit Folder
+POST {{baseUrl}}/api/v1/upload/trigger-submit
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="submit-file.csv"
+Content-Type: text/csv
+
+< ./db/mapper.sql
+--WebAppBoundary--
+
+
+### 8. Trigger Wbill Export
+GET {{baseUrl}}/api/v1/upload/trigger-wbill
+
+
+### 9. Trigger Dump Export
+GET {{baseUrl}}/api/v1/upload/trigger-dump
+
+
+### 10. Download Dump Zip
+GET {{baseUrl}}/api/v1/upload/trigger-dump/download
+
+
+### 11. Trigger Wbill H0 Export
+GET {{baseUrl}}/api/v1/upload/trigger-wbill-h0
+
+
+### 12. Download Wbill H0 Zip
+GET {{baseUrl}}/api/v1/upload/trigger-wbill-h0/download
+
+
+### 13. Trigger Wbill H1 Export
+GET {{baseUrl}}/api/v1/upload/trigger-wbill-h1
+
+
+### 14. Download Wbill H1 Zip
+GET {{baseUrl}}/api/v1/upload/trigger-wbill-h1/download
+
+
+### 15. Upload Zip to Extract to Upload Folder
+POST {{baseUrl}}/api/v1/upload/upload-data-zip
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="data.zip"
+Content-Type: application/zip
+
+< ./data.zip
+--WebAppBoundary--
+
+
+### 16. Clean Upload Folder
+GET {{baseUrl}}/api/v1/upload/clean-folder-upload

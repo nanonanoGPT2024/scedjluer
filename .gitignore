@@ -1,0 +1,126 @@
+# ==========================================
+# JAVA / MAVEN
+# ==========================================
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+*.zip
+*.tar.gz
+*.rar
+hs_err_pid*
+replay_pid*
+
+# Maven wrapper
+.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+# ==========================================
+# SPRING BOOT / CONFIG SENSITIF
+# ==========================================
+# Jangan commit config production yang ada password/secret
+src/main/resources/application.properties
+src/main/resources/application-prod.properties
+src/main/resources/application-staging.properties
+
+# Boleh commit yang ini (non-sensitif):
+# !src/main/resources/application-dev.properties
+# !src/main/resources/application-docker.properties
+
+# ==========================================
+# LOGS
+# ==========================================
+logs/
+*.log
+*.log.*
+log/
+
+# ==========================================
+# DATABASE / SQL DUMP
+# ==========================================
+# Dump database jangan masuk repo
+db/*-dump.sql
+db/*.dump
+db/master_*.sql
+
+# Kalau mau include query.sql saja, uncomment ini:
+# !db/query.sql
+
+# ==========================================
+# IDE - IntelliJ IDEA
+# ==========================================
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+# ==========================================
+# IDE - Eclipse / STS
+# ==========================================
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+bin/
+
+# ==========================================
+# IDE - VS Code
+# ==========================================
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# ==========================================
+# OS
+# ==========================================
+# Windows
+Thumbs.db
+Thumbs.db:encdata
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+
+# ==========================================
+# ENVIRONMENT & SECRETS
+# ==========================================
+.env
+.env.*
+*.env
+secrets/
+secret.yml
+secret.yaml
+credentials.json
+*.pem
+*.key
+*.p12
+*.jks
+
+# ==========================================
+# DOCKER (opsional, kalau ada)
+# ==========================================
+# docker-compose.override.yml
+
+# ==========================================
+# MISC
+# ==========================================
+*.tmp
+*.bak
+*.swp
+*.orig

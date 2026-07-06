@@ -1,0 +1,18 @@
+package co.id.mcs.dika.dto.common;
+
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+import java.time.LocalDateTime;
+
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+public class ErrorResponse {
+    private Boolean success;
+    private Integer status;
+    private String message;
+    private String path;
+    private LocalDateTime timestamp;
+}

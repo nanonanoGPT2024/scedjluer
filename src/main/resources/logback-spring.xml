@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- Import standard Spring Boot defaults for logging formatting -->
+    <include resource="org/springframework/boot/logging/logback/defaults.xml" />
+    
+    <!-- Dynamic Path Injection from Spring Environment (logging.file.path) -->
+    <springProperty scope="context" name="LOG_PATH" source="logging.file.path" defaultValue="logs" />
+    <springProperty scope="context" name="appName" source="spring.application.name" defaultValue="schedjuler"/>
+    <springProperty scope="context" name="LOG_LEVEL_ROOT" source="logging.level.root" defaultValue="INFO" />
+    <springProperty scope="context" name="LOG_LEVEL_APP" source="logging.level.co.id.mcs.dika" defaultValue="INFO" />
+    <springProperty scope="context" name="LOG_LEVEL_JDBC_HELPER" source="logging.level.co.id.mcs.dika.util.JdbcHelper" defaultValue="INFO" />
+    <springProperty scope="context" name="LOG_LEVEL_JDBC" source="logging.level.org.springframework.jdbc.core" defaultValue="WARN" />
+    <property name="LOG_FILE" value="${LOG_PATH}/${appName}.log" />
+    
+    <!-- 1. Console Appender (Log ke Terminal/Stdout) -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+            <charset>utf8</charset>
+        </encoder>
+    </appender>
+    
+    <!-- 2. Daily Rolling File Appender (Optimasi Hemat Ruang) -->
+    <appender name="DAILY_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_FILE}</file>
+        
+        <!-- Size and Time-based Rolling Policy -->
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <!-- Rotasi harian dan kompresi gzip otomatis untuk menghemat ruang disk hingga 90% -->
+            <fileNamePattern>${LOG_PATH}/archived/${appName}-%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            
+            <!-- Maksimal ukuran satu file sebelum di-split (10MB) agar mudah dibaca -->
+            <maxFileSize>10MB</maxFileSize>
+            
+            <!-- Masa simpan log diperpendek (7 hari) untuk mencegah penumpukan file lama -->
+            <maxHistory>7</maxHistory>
+            
+            <!-- Batas total seluruh ukuran file log (maksimal 1GB) -->
+            <totalSizeCap>1GB</totalSizeCap>
+            
+            <cleanOnStart>false</cleanOnStart>
+        </rollingPolicy>
+        
+        <encoder>
+            <!-- Format log bersih tanpa kode warna terminal agar mudah dibaca di server -->
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+            <charset>utf8</charset>
+        </encoder>
+    </appender>
+    
+    <!-- Pengaturan Level Logger agar tidak spamming DEBUG log -->
+    <logger name="co.id.mcs.dika" level="${LOG_LEVEL_APP}" />
+    <logger name="co.id.mcs.dika.util.JdbcHelper" level="${LOG_LEVEL_JDBC_HELPER}" />
+    <!-- Mencegah pencatatan query SQL Spring JDBC secara berlebihan, cukup level WARN/ERROR di file log -->
+    <logger name="org.springframework.jdbc.core" level="${LOG_LEVEL_JDBC}" />
+    
+    <!-- 3. Root Level Logger Configuration -->
+    <root level="${LOG_LEVEL_ROOT}">
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="DAILY_FILE" />
+    </root>
+</configuration>
