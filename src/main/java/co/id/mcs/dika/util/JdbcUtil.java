@@ -14,13 +14,12 @@ import lombok.extern.log4j.Log4j2;
 public class JdbcUtil {
 
     /**
-     * Performs a true bulk insert using a single INSERT INTO ... VALUES (), (), ...
-     * statement.
-     * Uses reflection to extract table and column names from @Table and @Column
-     * annotations.
-     * 
+     * Performs a high-performance bulk insert by generating explicit multi-row
+     * positional INSERT INTO table (cols) VALUES (?,?,?), (?,?,?) statements.
+     * Bypasses Spring NamedParameter parsing overhead for massive performance gains.
+     *
      * @param <T>          The entity type
-     * @param jdbcTemplate The NamedParameterJdbcTemplate to use
+     * @param jdbcTemplate The NamedParameterJdbcTemplate to extract raw JdbcTemplate from
      * @param entities     The list of entities to insert
      * @param clazz        The class of the entity
      */
@@ -48,75 +47,60 @@ public class JdbcUtil {
             return;
         }
 
-        // Batch processing to avoid parameter limits (PostgreSQL typically 65535)
-        int batchSize = 65000 / fields.size();
-        if (batchSize < 1)
-            batchSize = 1;
+        org.springframework.jdbc.core.JdbcTemplate rawJdbc = jdbcTemplate.getJdbcTemplate();
+        
+        // 1000 rows chunk size reduces round-trips while staying well within PG parameters limit (65535)
+        int chunkSize = 1000;
+        String colsPart = String.join(", ", columnNames);
+        int numCols = columnNames.size();
 
-        // Also limit batchSize to 500 to keep SQL size and parameters reasonably small
-        // for JDBC driver
-        if (batchSize > 500) {
-            batchSize = 500;
+        // Build single-row placeholders: (?,?,?,...,?)
+        StringBuilder rowPlBuilder = new StringBuilder("(");
+        for (int k = 0; k < numCols; k++) {
+            if (k > 0) rowPlBuilder.append(",");
+            rowPlBuilder.append("?");
         }
+        rowPlBuilder.append(")");
+        String singleRowPlaceholder = rowPlBuilder.toString();
 
-        org.springframework.jdbc.core.JdbcTemplate rawJdbcTemplate = jdbcTemplate.getJdbcTemplate();
+        for (int i = 0; i < entities.size(); i += chunkSize) {
+            int end = Math.min(i + chunkSize, entities.size());
+            List<T> chunk = entities.subList(i, end);
+            int chunkLen = chunk.size();
 
-        for (int i = 0; i < entities.size(); i += batchSize) {
-            int end = Math.min(i + batchSize, entities.size());
-            List<T> batch = entities.subList(i, end);
-
-            StringBuilder sql = new StringBuilder("INSERT INTO ")
+            StringBuilder sqlBuilder = new StringBuilder("INSERT INTO ")
                     .append(tableName)
-                    .append(" (")
-                    .append(String.join(", ", columnNames))
-                    .append(") VALUES ");
+                    .append(" (").append(colsPart).append(") VALUES ");
 
-            List<Object> args = new ArrayList<>(batch.size() * fields.size());
-            for (int j = 0; j < batch.size(); j++) {
-                if (j > 0)
-                    sql.append(", ");
-                sql.append("(");
-                T entity = batch.get(j);
-                for (int k = 0; k < fields.size(); k++) {
-                    if (k > 0)
-                        sql.append(", ");
-                    sql.append("?");
+            Object[] params = new Object[chunkLen * numCols];
+
+            for (int r = 0; r < chunkLen; r++) {
+                if (r > 0) sqlBuilder.append(",");
+                sqlBuilder.append(singleRowPlaceholder);
+
+                T entity = chunk.get(r);
+                for (int k = 0; k < numCols; k++) {
                     try {
-                        args.add(fields.get(k).get(entity));
+                        Object value = fields.get(k).get(entity);
+                        // Normalize java.util.Date to Timestamp for PostgreSQL
+                        if (value instanceof java.util.Date
+                                && !(value instanceof java.sql.Date)
+                                && !(value instanceof java.sql.Timestamp)) {
+                            value = new java.sql.Timestamp(((java.util.Date) value).getTime());
+                        }
+                        params[r * numCols + k] = value;
                     } catch (IllegalAccessException e) {
-                        args.add(null);
+                        params[r * numCols + k] = null;
                     }
                 }
-                sql.append(")");
             }
 
             try {
-                rawJdbcTemplate.update(sql.toString(), args.toArray());
+                rawJdbc.update(sqlBuilder.toString(), params);
             } catch (Exception e) {
                 log.error("Failed to perform bulk insert for table {}: {}", tableName, e.getMessage());
-                try {
-                    StringBuilder debugSql = new StringBuilder(sql.toString());
-                    for (Object arg : args) {
-                        int qMark = debugSql.indexOf("?");
-                        if (qMark == -1)
-                            break;
-                        String val = "NULL";
-                        if (arg != null) {
-                            if (arg instanceof String || arg instanceof java.util.Date
-                                    || arg instanceof java.util.UUID) {
-                                val = "'" + arg.toString().replace("'", "''") + "'";
-                            } else {
-                                val = arg.toString();
-                            }
-                        }
-                        debugSql.replace(qMark, qMark + 1, val);
-                    }
-                    log.error("Generated SQL with actual values: {}", debugSql.toString());
-                } catch (Exception ex) {
-                    log.error("Could not generate debug SQL: {}", ex.getMessage());
-                }
                 log.error("Exception details: ", e);
-                throw e; // Rethrow to allow caller to handle if needed
+                throw e;
             }
         }
     }

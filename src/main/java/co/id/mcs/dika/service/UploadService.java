@@ -17,7 +17,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import co.id.mcs.dika.constant.ActionCode;
@@ -59,7 +58,6 @@ public class UploadService {
     @Autowired
     private MasterKotaUploadRepository masterKotaUploadRepository;
 
-    @Transactional(timeout = 300)
     public ResponseEntity<?> processUpload(MultipartFile file, String userId, String appReferenceId) {
 
         try {

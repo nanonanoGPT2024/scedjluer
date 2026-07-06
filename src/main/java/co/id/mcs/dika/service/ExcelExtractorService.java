@@ -19,8 +19,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
@@ -77,10 +79,6 @@ public class ExcelExtractorService {
     private static final AtomicLong GLOBAL_CASE_ID = new AtomicLong(-1);
     private static final AtomicLong GLOBAL_VIP_COUNT = new AtomicLong(-1);
     private final Object initLock = new Object();
-    private List<UUID> cachedManagerIds = new ArrayList<>();
-    private List<String> cachedManagerNames = new ArrayList<>();
-    private long lastManagerFetchTime = 0;
-    private static final long MANAGER_CACHE_TTL = 10 * 60 * 1000; // 10 minutes cache
 
     @Autowired
     private MapperRepository mapperRepository;
@@ -107,13 +105,14 @@ public class ExcelExtractorService {
     private OrderDataDuplicateRepository orderDataDuplicateRepository;
 
     @Autowired
-    private AgentService agentService;
-
-    @Autowired
     private NamedParameterJdbcTemplate namedParameterJdbcTemplate;
 
     @Autowired
     private PlatformTransactionManager transactionManager;
+
+    @Autowired
+    @Qualifier("ioExecutor")
+    private Executor ioExecutor;
 
     private static final Pattern CAMPAIGN_DATE_PATTERN = Pattern.compile("\\d{2}(\\d{6})");
 
@@ -144,6 +143,12 @@ public class ExcelExtractorService {
 
     public Map<String, Object> extractWithRules(java.io.File file, String fileName, String userId,
             String appReferenceId) {
+        boolean isLargeFile = file.length() > 10 * 1024 * 1024; // 10MB
+        if (isLargeFile) {
+            log.warn("Large file detected ({} bytes). Dropping indexes for faster bulk insert...", file.length());
+            dropIndexes();
+        }
+
         try {
             String fileType = determineFileType(fileName);
             var mappers = mapperRepository.where("file", "=", fileType).select();
@@ -158,6 +163,11 @@ public class ExcelExtractorService {
             log.error("Data streaming error: {}", e.getMessage());
             log.error("Stack trace: ", e);
             return new HashMap<>();
+        } finally {
+            if (isLargeFile) {
+                log.warn("Recreating indexes after bulk insert...");
+                recreateIndexes();
+            }
         }
     }
 
@@ -165,7 +175,7 @@ public class ExcelExtractorService {
             Mapper mapperEntity, ExtractionConfig config, String appReferenceId) throws Exception {
 
         ObjectMapper objectMapper = createObjectMapper();
-        BatchContext context = new BatchContext(fileName, mapperEntity, namedParameterJdbcTemplate, agentService);
+        BatchContext context = new BatchContext(fileName, mapperEntity, namedParameterJdbcTemplate);
         context.appReferenceId = appReferenceId;
         Set<String> processedKeysInFile = new HashSet<>();
 
@@ -567,92 +577,21 @@ public class ExcelExtractorService {
         String fileName;
         Mapper mapperEntity;
         NamedParameterJdbcTemplate jdbcTemplate;
-        AgentService agentService;
         String appReferenceId;
 
         Map<String, CampaignStats> statsMap = new HashMap<>();
         Map<String, MasterCampaign> campaignCache = new HashMap<>();
         List<MasterCampaign> newCampaigns = new ArrayList<>();
 
-        List<UUID> managerIds = new ArrayList<>();
-        List<String> managerNames = new ArrayList<>();
-        int picPointer = 0;
-
-        BatchContext(String fileName, Mapper mapperEntity, NamedParameterJdbcTemplate jdbcTemplate,
-                AgentService agentService) {
+        BatchContext(String fileName, Mapper mapperEntity, NamedParameterJdbcTemplate jdbcTemplate) {
             this.fileName = fileName;
             this.mapperEntity = mapperEntity;
             this.jdbcTemplate = jdbcTemplate;
-            this.agentService = agentService;
             init();
         }
 
         private void init() {
             ensureCountersInitialized();
-
-            java.util.concurrent.CompletableFuture<Void> managerFuture = java.util.concurrent.CompletableFuture
-                    .runAsync(this::fetchManagers);
-
-            try {
-                managerFuture.join();
-            } catch (Exception e) {
-                log.warn("Init parallel fetch partially failed: {}", e.getMessage());
-            }
-        }
-
-        private void fetchManagers() {
-            synchronized (initLock) {
-                if (System.currentTimeMillis() - lastManagerFetchTime < MANAGER_CACHE_TTL
-                        && !cachedManagerIds.isEmpty()) {
-                    this.managerIds.addAll(cachedManagerIds);
-                    this.managerNames.addAll(cachedManagerNames);
-                    return;
-                }
-            }
-
-            try {
-                Map<String, Object> req = new HashMap<>();
-                Map<String, Object> payload = new HashMap<>();
-                Map<String, Object> where = new HashMap<>();
-                where.put("position", "manager");
-                where.put("user_active", "active");
-                payload.put("where", where);
-                payload.put("page", 1);
-                payload.put("limit", 100);
-                req.put("payload", payload);
-
-                Map<String, Object> resp = agentService.getAgentList(req);
-                if (resp != null && resp.containsKey("payload")) {
-                    Map<String, Object> pMap = (Map<String, Object>) resp.get("payload");
-                    List<Map<String, Object>> agents = (List<Map<String, Object>>) pMap.get("payload");
-                    if (agents != null) {
-                        List<UUID> tempIds = new ArrayList<>();
-                        List<String> tempNames = new ArrayList<>();
-                        for (Map<String, Object> agent : agents) {
-                            tempIds.add(UUID.fromString(agent.get("agent_id").toString()));
-                            tempNames.add(agent.get("full_name").toString());
-                        }
-                        synchronized (initLock) {
-                            cachedManagerIds = tempIds;
-                            cachedManagerNames = tempNames;
-                            lastManagerFetchTime = System.currentTimeMillis();
-                        }
-                        this.managerIds.addAll(tempIds);
-                        this.managerNames.addAll(tempNames);
-                        return;
-                    }
-                }
-            } catch (Exception e) {
-                log.warn("Manager fetch failed, using fallback from cache: {}", e.getMessage());
-            }
-
-            // Fallback to cache if request failed
-            synchronized (initLock) {
-                if (!cachedManagerIds.isEmpty()) {
-                    this.managerIds.addAll(cachedManagerIds);
-                    this.managerNames.addAll(cachedManagerNames);
-                }
-            }
         }
     }
 
@@ -710,13 +649,18 @@ public class ExcelExtractorService {
         if (map.containsKey("ca")) {
             Map<String, Object> caMap = (Map<String, Object>) map.get("ca");
             for (Map.Entry<String, Object> entry : caMap.entrySet()) {
+                // Skip empty address values — no point inserting blank rows
+                Object valObj = entry.getValue();
+                if (valObj == null || valObj.toString().trim().isEmpty()) {
+                    continue;
+                }
                 Map<String, Object> rule = keyToRuleMap.get("ca." + entry.getKey());
                 if (rule != null) {
                     Map<String, Object> toMap = (Map<String, Object>) rule.get("to");
                     Map<String, Object> entityMap = new HashMap<>();
                     if (toMap.containsKey("identifiers"))
                         entityMap.putAll((Map<String, Object>) toMap.get("identifiers"));
-                    entityMap.put((String) toMap.get("name"), entry.getValue());
+                    entityMap.put((String) toMap.get("name"), valObj);
                     entityMap.put("id", UUID.randomUUID());
                     entityMap.put("customer_id", customerId);
                     entityMap.put("created_date", now);
@@ -726,14 +670,26 @@ public class ExcelExtractorService {
         }
         if (map.containsKey("cph")) {
             Map<String, Object> cphMap = (Map<String, Object>) map.get("cph");
+            Set<String> seenPhoneNumbers = new HashSet<>();
             for (Map.Entry<String, Object> entry : cphMap.entrySet()) {
+                // Skip empty phone values — no point inserting blank rows
+                Object valObj = entry.getValue();
+                if (valObj == null || valObj.toString().trim().isEmpty()) {
+                    continue;
+                }
+                // Deduplicate identical phone numbers per customer
+                String phoneNormalized = valObj.toString().trim().replaceAll("[^0-9]", "");
+                String dedupeKey = phoneNormalized.isEmpty() ? valObj.toString().trim() : phoneNormalized;
+                if (!seenPhoneNumbers.add(dedupeKey)) {
+                    continue; // already inserted this number for this customer
+                }
                 Map<String, Object> rule = keyToRuleMap.get("cph." + entry.getKey());
                 if (rule != null) {
                     Map<String, Object> toMap = (Map<String, Object>) rule.get("to");
                     Map<String, Object> entityMap = new HashMap<>();
                     if (toMap.containsKey("identifiers"))
                         entityMap.putAll((Map<String, Object>) toMap.get("identifiers"));
-                    entityMap.put((String) toMap.get("name"), entry.getValue());
+                    entityMap.put((String) toMap.get("name"), valObj);
                     entityMap.put("id", UUID.randomUUID());
                     entityMap.put("customer_id", customerId);
                     entityMap.put("created_at", now);
@@ -786,53 +742,138 @@ public class ExcelExtractorService {
         od.setLastCall(null);
         od.setLastHangupCode(null);
         od.setLastHangupCause(null);
-
-        if (!ctx.managerIds.isEmpty()) {
-            int idx = ctx.picPointer % ctx.managerIds.size();
-            od.setIdPic(ctx.managerIds.get(idx));
-            od.setIdManager(ctx.managerIds.get(idx));
-            od.setPicFullname(ctx.managerNames.get(idx));
-            ctx.picPointer++;
-        }
     }
 
     private void flushAllBatches(List<DataCustomerProfile> profiles, List<CustomerAddress> addresses,
             List<CustomerPhone> phones, List<OrderData> orders, List<OrderDataDuplicate> duplicates, BatchContext ctx) {
         TransactionTemplate transactionTemplate = new TransactionTemplate(transactionManager);
         try {
+            // Collect logUploads before the transaction clears orders
+            List<String> logUploads = new ArrayList<>();
+            if (!orders.isEmpty()) {
+                for (OrderData od : orders) {
+                    if (od.getLogUpload() != null && !logUploads.contains(od.getLogUpload())) {
+                        logUploads.add(od.getLogUpload());
+                    }
+                }
+            }
+
+            // Phase 1: Core inserts (campaigns, profiles, orders, duplicates) — atomic transaction
+            long[] t = new long[5];
             transactionTemplate.execute(status -> {
                 try {
+                    t[0] = System.currentTimeMillis();
                     if (!ctx.newCampaigns.isEmpty()) {
                         JdbcUtil.bulkInsert(ctx.jdbcTemplate, ctx.newCampaigns, MasterCampaign.class);
                         ctx.newCampaigns.clear();
                     }
+                    t[1] = System.currentTimeMillis();
                     if (!profiles.isEmpty()) {
                         JdbcUtil.bulkInsert(ctx.jdbcTemplate, profiles, DataCustomerProfile.class);
                         profiles.clear();
                     }
+                    t[2] = System.currentTimeMillis();
                     if (!orders.isEmpty()) {
                         JdbcUtil.bulkInsert(ctx.jdbcTemplate, orders, OrderData.class);
                         orders.clear();
                     }
-                    if (!addresses.isEmpty()) {
-                        JdbcUtil.bulkInsert(ctx.jdbcTemplate, addresses, CustomerAddress.class);
-                        addresses.clear();
-                    }
-                    if (!phones.isEmpty()) {
-                        JdbcUtil.bulkInsert(ctx.jdbcTemplate, phones, CustomerPhone.class);
-                        phones.clear();
-                    }
+                    t[3] = System.currentTimeMillis();
                     if (!duplicates.isEmpty()) {
                         JdbcUtil.bulkInsert(ctx.jdbcTemplate, duplicates, OrderDataDuplicate.class);
                         duplicates.clear();
                     }
+                    t[4] = System.currentTimeMillis();
                 } catch (Exception e) {
-                    log.error("Batch insertion failed, rolling back: {}", e.getMessage());
+                    log.error("Core batch insertion failed, rolling back: {}", e.getMessage());
                     status.setRollbackOnly();
                     throw e;
                 }
                 return null;
             });
+
+            // Phase 2: Addresses and phones in PARALLEL (auto-committed, independent of each other)
+            final List<CustomerAddress> addrBatch = new ArrayList<>(addresses);
+            final List<CustomerPhone> phoneBatch = new ArrayList<>(phones);
+            addresses.clear();
+            phones.clear();
+
+            AtomicLong addrMs = new AtomicLong(0);
+            AtomicLong phoneMs = new AtomicLong(0);
+
+            log.info("[PERF] addrBatch size: {}, phoneBatch size: {}", addrBatch.size(), phoneBatch.size());
+
+            CompletableFuture<Void> addrFuture = addrBatch.isEmpty()
+                    ? CompletableFuture.completedFuture(null)
+                    : CompletableFuture.runAsync(() -> {
+                        long s = System.currentTimeMillis();
+                        JdbcUtil.bulkInsert(ctx.jdbcTemplate, addrBatch, CustomerAddress.class);
+                        addrMs.set(System.currentTimeMillis() - s);
+                    }, ioExecutor);
+
+            CompletableFuture<Void> phoneFuture = phoneBatch.isEmpty()
+                    ? CompletableFuture.completedFuture(null)
+                    : CompletableFuture.runAsync(() -> {
+                        long s = System.currentTimeMillis();
+                        JdbcUtil.bulkInsert(ctx.jdbcTemplate, phoneBatch, CustomerPhone.class);
+                        phoneMs.set(System.currentTimeMillis() - s);
+                    }, ioExecutor);
+
+            // Phones MUST be committed before leads (leads JOINs on customer_phone)
+            try {
+                phoneFuture.join();
+            } catch (Exception e) {
+                log.error("Phone batch insertion failed: {}", e.getMessage());
+            }
+
+            // Phase 3: Leads — runs while addresses are still inserting in background
+            long leadsStart = System.currentTimeMillis();
+            if (!logUploads.isEmpty()) {
+                for (String logUpload : logUploads) {
+                    String leadSql = """
+                            INSERT INTO leads (
+                                id, source_id, cust_no, phone, customer_name, created_at,
+                                mock_call, campaign_id, status, app_reference_id,
+                                phone_id, phone_type, is_primary, customer_id
+                            )
+                            SELECT
+                                gen_random_uuid(),
+                                od.id,
+                                od.case_id::text,
+                                cph.phone_number,
+                                cp.name,
+                                NOW(),
+                                false,
+                                od.campaign_id,
+                                'NEW',
+                                od.app_reference_id,
+                                cph.id,
+                                cph.phone_type,
+                                cph.is_primary,
+                                cp.id
+                            FROM order_data od
+                            INNER JOIN data_customer_profile cp ON od.customer_id = cp.id
+                            INNER JOIN customer_phone cph ON od.customer_id = cph.customer_id
+                            WHERE od.log_upload = :logUpload
+                            """;
+
+                    Map<String, Object> paramMap = new HashMap<>();
+                    paramMap.put("logUpload", logUpload);
+                    ctx.jdbcTemplate.update(leadSql, paramMap);
+                }
+            }
+            long leadsMs = System.currentTimeMillis() - leadsStart;
+
+            // Wait for addresses to finish (ran in parallel with phones + leads)
+            try {
+                addrFuture.join();
+            } catch (Exception e) {
+                log.error("Address batch insertion failed: {}", e.getMessage());
+            }
+
+            log.info(
+                    "[PERF-BATCH] Campaigns: {}ms, Profiles: {}ms, Orders: {}ms, Duplicates: {}ms, Phones(parallel): {}ms, Addresses(parallel): {}ms, Leads: {}ms",
+                    (t[1] - t[0]), (t[2] - t[1]), (t[3] - t[2]), (t[4] - t[3]),
+                    phoneMs.get(), addrMs.get(), leadsMs);
         } finally {
             // CRITICAL: Always clear batches to prevent memory leaks/avalanche on failure
             profiles.clear();
@@ -935,6 +976,39 @@ public class ExcelExtractorService {
         public CampaignStats(String campaignCode) {
             this.campaignCode = campaignCode;
             this.logId = UUID.randomUUID();
+        }
+    }
+
+    private void dropIndexes() {
+        try {
+            log.warn("Dropping indexes...");
+            namedParameterJdbcTemplate.getJdbcTemplate().execute("DROP INDEX IF EXISTS idx_customer_phone_customer_id");
+            namedParameterJdbcTemplate.getJdbcTemplate()
+                    .execute("DROP INDEX IF EXISTS idx_customer_phone_customer_id_type");
+            namedParameterJdbcTemplate.getJdbcTemplate().execute("DROP INDEX IF EXISTS idx_customer_phone_number");
+            namedParameterJdbcTemplate.getJdbcTemplate()
+                    .execute("DROP INDEX IF EXISTS idx_customer_address_customer_id");
+            namedParameterJdbcTemplate.getJdbcTemplate().execute("DROP INDEX IF EXISTS idx_addr_kota");
+            log.warn("Indexes dropped successfully.");
+        } catch (Exception e) {
+            log.error("Failed to drop indexes: {}", e.getMessage());
+        }
+    }
+
+    private void recreateIndexes() {
+        try {
+            log.warn("Recreating indexes...");
+            namedParameterJdbcTemplate.getJdbcTemplate().execute(
+                    "CREATE INDEX IF NOT EXISTS idx_customer_phone_customer_id_type ON customer_phone(customer_id, phone_type)");
+            namedParameterJdbcTemplate.getJdbcTemplate()
+                    .execute("CREATE INDEX IF NOT EXISTS idx_customer_phone_number ON customer_phone(phone_number)");
+            namedParameterJdbcTemplate.getJdbcTemplate().execute(
+                    "CREATE INDEX IF NOT EXISTS idx_customer_address_customer_id ON customer_address(customer_id)");
+            namedParameterJdbcTemplate.getJdbcTemplate()
+                    .execute("CREATE INDEX IF NOT EXISTS idx_addr_kota ON customer_address(kota)");
+            log.warn("Indexes recreated successfully.");
+        } catch (Exception e) {
+            log.error("Failed to recreate indexes: {}", e.getMessage());
         }
     }
 }
