@@ -106,7 +106,7 @@ public class AutoUpdateService {
         for (File file : files) {
             log.info("Processing update file: {}", file.getName());
             try {
-                processCsvFile(file);
+                processCsvFilev2(file);
                 if (file.delete()) {
                     log.info("Successfully deleted processed file: {}", file.getName());
                 } else {
@@ -131,39 +131,42 @@ public class AutoUpdateService {
 
         // ── Tahap 1: Baca CSV ke memory ────────────────────────────────────────
         record CsvRow(
-            Long caseId, String cis, String barcode,
-            String statusMs, String reasonMs,
-            String pickupResultDateStr, String msCodeUpdate, String msNameUpdate
-        ) {}
+                Long caseId, String cis, String barcode,
+                String statusMs, String reasonMs,
+                String pickupResultDateStr, String msCodeUpdate, String msNameUpdate) {
+        }
 
         List<CsvRow> rows = new ArrayList<>();
 
         try (BufferedReader br = new BufferedReader(new FileReader(file))) {
             String header = br.readLine();
-            if (header == null) return;
+            if (header == null)
+                return;
 
             String line;
             int lineNum = 0;
             while ((line = br.readLine()) != null) {
                 lineNum++;
-                if (line.trim().isEmpty()) continue;
+                if (line.trim().isEmpty())
+                    continue;
                 String[] v = line.replace("\"\"", "").split("\\|");
-                if (v.length < 33) continue;
+                if (v.length < 33)
+                    continue;
                 try {
                     String caseIdStr = v[1].replace("\"", "").trim();
-                    if (caseIdStr.isEmpty()) continue;
+                    if (caseIdStr.isEmpty())
+                        continue;
                     Long caseId = Long.parseLong(caseIdStr);
 
                     rows.add(new CsvRow(
-                        caseId,
-                        v[2].replace("\"", "").trim(),
-                        v[24].replace("\"", "").trim(),
-                        v[25].replace("\"", "").trim(),
-                        v[27].replace("\"", "").trim(),
-                        v[30].replace("\"", "").trim(),
-                        v[31].replace("\"", "").trim(),
-                        v[32].replace("\"", "").trim()
-                    ));
+                            caseId,
+                            v[2].replace("\"", "").trim(),
+                            v[24].replace("\"", "").trim(),
+                            v[25].replace("\"", "").trim(),
+                            v[27].replace("\"", "").trim(),
+                            v[30].replace("\"", "").trim(),
+                            v[31].replace("\"", "").trim(),
+                            v[32].replace("\"", "").trim()));
                 } catch (Exception e) {
                     log.error("Error parsing row {}: {}", lineNum, e.getMessage());
                 }
@@ -178,7 +181,8 @@ public class AutoUpdateService {
 
         // ── Tahap 2: Fetch order_data sekaligus (1 query IN) ─────────────────
         Set<Long> caseIds = new HashSet<>();
-        for (CsvRow r : rows) caseIds.add(r.caseId());
+        for (CsvRow r : rows)
+            caseIds.add(r.caseId());
 
         // Map: case_id → {id (UUID)}
         Map<Long, UUID> caseIdToOrderId = new HashMap<>();
@@ -199,7 +203,8 @@ public class AutoUpdateService {
         // ── Tahap 3: Batch UPDATE order_data via CASE WHEN (1 query) ─────────
         List<CsvRow> matchedRows = new ArrayList<>();
         for (CsvRow r : rows) {
-            if (caseIdToOrderId.containsKey(r.caseId())) matchedRows.add(r);
+            if (caseIdToOrderId.containsKey(r.caseId()))
+                matchedRows.add(r);
         }
 
         int batchSize = 500;
@@ -211,11 +216,11 @@ public class AutoUpdateService {
             int end = Math.min(i + batchSize, matchedRows.size());
             List<CsvRow> chunk = matchedRows.subList(i, end);
 
-            StringBuilder caseStatus   = new StringBuilder("CASE ");
-            StringBuilder caseReason   = new StringBuilder("CASE ");
-            StringBuilder casePuDate   = new StringBuilder("CASE ");
-            StringBuilder caseMsCode   = new StringBuilder("CASE ");
-            StringBuilder caseMsName   = new StringBuilder("CASE ");
+            StringBuilder caseStatus = new StringBuilder("CASE ");
+            StringBuilder caseReason = new StringBuilder("CASE ");
+            StringBuilder casePuDate = new StringBuilder("CASE ");
+            StringBuilder caseMsCode = new StringBuilder("CASE ");
+            StringBuilder caseMsName = new StringBuilder("CASE ");
             List<UUID> ids = new ArrayList<>();
             MapSqlParameterSource params = new MapSqlParameterSource();
             params.addValue("now", now);
@@ -227,15 +232,18 @@ public class AutoUpdateService {
 
                 Date puDate = null;
                 if (!r.pickupResultDateStr().isEmpty()) {
-                    try { puDate = dateFormat.parse(r.pickupResultDateStr()); } catch (Exception ignore) {}
+                    try {
+                        puDate = dateFormat.parse(r.pickupResultDateStr());
+                    } catch (Exception ignore) {
+                    }
                 }
 
-                String idKey  = "id"  + j;
-                String smKey  = "sm"  + j;
-                String rmKey  = "rm"  + j;
-                String pdKey  = "pd"  + j;
-                String mcKey  = "mc"  + j;
-                String mnKey  = "mn"  + j;
+                String idKey = "id" + j;
+                String smKey = "sm" + j;
+                String rmKey = "rm" + j;
+                String pdKey = "pd" + j;
+                String mcKey = "mc" + j;
+                String mnKey = "mn" + j;
 
                 params.addValue(idKey, orderId);
                 params.addValue(smKey, r.statusMs());
@@ -273,13 +281,13 @@ public class AutoUpdateService {
             params.addValue("ids", ids);
 
             String finalSql = "UPDATE order_data SET " +
-                "status_ms = " + caseStatus + ", " +
-                "reason_ms = " + caseReason + ", " +
-                "pickup_result_date = " + casePuDate + ", " +
-                "ms_code_update = " + caseMsCode + ", " +
-                "ms_name_update = " + caseMsName + ", " +
-                "update_date = :now " +
-                "WHERE id IN (:ids)";
+                    "status_ms = " + caseStatus + ", " +
+                    "reason_ms = " + caseReason + ", " +
+                    "pickup_result_date = " + casePuDate + ", " +
+                    "ms_code_update = " + caseMsCode + ", " +
+                    "ms_name_update = " + caseMsName + ", " +
+                    "update_date = :now " +
+                    "WHERE id IN (:ids)";
 
             int affected = namedParameterJdbcTemplate.update(finalSql, params);
             updateCount += affected;
@@ -298,5 +306,111 @@ public class AutoUpdateService {
 
         log.info("Finished processing {}: read={}, matched={}, updated={}, printing={}",
                 file.getName(), rows.size(), matchedRows.size(), updateCount, printingBatch.size());
+    }
+
+    private void processCsvFilev2(File file) throws Exception {
+        SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        Date now = new Date();
+
+        List<MapSqlParameterSource> updateBatch = new ArrayList<>();
+        List<Printing> printingBatch = new ArrayList<>();
+
+        try (BufferedReader br = new BufferedReader(new FileReader(file))) {
+            String header = br.readLine();
+            if (header == null)
+                return;
+
+            String line;
+            int lineNum = 0;
+            int batchSize = 500;
+
+            while ((line = br.readLine()) != null) {
+                lineNum++;
+                if (line.trim().isEmpty())
+                    continue;
+                String[] v = line.replace("\"\"", "").split("\\|");
+                if (v.length < 33)
+                    continue;
+
+                try {
+                    String caseIdStr = v[1].replace("\"", "").trim();
+                    if (caseIdStr.isEmpty())
+                        continue;
+                    Long caseId = Long.parseLong(caseIdStr);
+
+                    // Cek keberadaan data di order_data berdasarkan case_id
+                    String sqlCheck = "SELECT id FROM order_data WHERE case_id = :caseId";
+                    MapSqlParameterSource checkParams = new MapSqlParameterSource("caseId", caseId);
+                    List<UUID> orderIds = namedParameterJdbcTemplate.query(sqlCheck, checkParams,
+                            (rs, rowNum) -> UUID.fromString(rs.getString("id")));
+
+                    if (!orderIds.isEmpty()) {
+
+                        Date puDate = null;
+                        String puDateStr = v[30].replace("\"", "").trim();
+                        if (!puDateStr.isEmpty()) {
+                            try {
+                                puDate = dateFormat.parse(puDateStr);
+                            } catch (Exception ignore) {
+                            }
+                        }
+
+                        // Buat parameter update
+                        MapSqlParameterSource uParams = new MapSqlParameterSource();
+                        uParams.addValue("caseId", caseId);
+                        uParams.addValue("statusMs", v[25].replace("\"", "").trim());
+                        uParams.addValue("reasonMs", v[27].replace("\"", "").trim());
+                        uParams.addValue("puDate", puDate);
+                        uParams.addValue("msCode", v[31].replace("\"", "").trim());
+                        uParams.addValue("msName", v[32].replace("\"", "").trim());
+                        uParams.addValue("now", now);
+                        updateBatch.add(uParams);
+
+                        // Buat data Printing
+                        Printing printing = new Printing();
+                        printing.setId(UUID.randomUUID());
+                        printing.setNoCase(caseId);
+                        printing.setCis(v[2].replace("\"", "").trim());
+                        printing.setBarcode(v[24].replace("\"", "").trim());
+                        printing.setStatusPickUpMs(v[25].replace("\"", "").trim());
+                        printing.setStatusGagalPu(v[27].replace("\"", "").trim());
+                        printing.setPuMsDate(puDateStr);
+                        printing.setMsCode(v[31].replace("\"", "").trim());
+                        printing.setMsName(v[32].replace("\"", "").trim());
+                        printing.setDateUpload(now);
+                        printingBatch.add(printing);
+                    }
+                } catch (Exception e) {
+                    log.error("Error parsing row {}: {}", lineNum, e.getMessage());
+                }
+
+                // Simpan jika batch sudah mencapai 500
+                if (updateBatch.size() >= batchSize) {
+                    executeBatches(updateBatch, printingBatch);
+                    updateBatch.clear();
+                    printingBatch.clear();
+                }
+            }
+
+            // Simpan sisa data
+            if (!updateBatch.isEmpty()) {
+                executeBatches(updateBatch, printingBatch);
+            }
+        }
+    }
+
+    private void executeBatches(List<MapSqlParameterSource> updateBatch, List<Printing> printingBatch) {
+        String sqlUpdate = "UPDATE order_data SET " +
+                "status_ms = :statusMs, " +
+                "reason_ms = :reasonMs, " +
+                "pickup_result_date = :puDate, " +
+                "ms_code_update = :msCode, " +
+                "ms_name_update = :msName, " +
+                "update_date = :now " +
+                "WHERE case_id = :caseId";
+
+        namedParameterJdbcTemplate.batchUpdate(sqlUpdate, updateBatch.toArray(new MapSqlParameterSource[0]));
+        JdbcUtil.bulkInsert(namedParameterJdbcTemplate, new ArrayList<>(printingBatch), Printing.class);
+        log.info("Batch saved. Updated: {}, Printing inserted: {}", updateBatch.size(), printingBatch.size());
     }
 }

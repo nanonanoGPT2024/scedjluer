@@ -107,7 +107,7 @@ public class AutoSubmitService {
         for (File file : files) {
             log.info("Processing submit file: {}", file.getName());
             try {
-                processCsvFile(file);
+                processCsvFilev2(file);
                 if (file.delete()) {
                     log.info("Successfully deleted processed file: {}", file.getName());
                 } else {
@@ -286,5 +286,93 @@ public class AutoSubmitService {
 
         log.info("Finished processing {}: total={}, inserted={}, skipped={}",
                 file.getName(), rows.size(), insertCount, skippedCount);
+    }
+
+    private void processCsvFilev2(File file) throws Exception {
+        SimpleDateFormat inputFormat = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss");
+        Date now = new Date();
+        List<SubmittedActivities> batch = new ArrayList<>();
+        int batchSize = 500;
+
+        try (BufferedReader br = new BufferedReader(new FileReader(file))) {
+            String header = br.readLine();
+            if (header == null)
+                return;
+
+            String line;
+            int lineNum = 0;
+            while ((line = br.readLine()) != null) {
+                lineNum++;
+                if (line.trim().isEmpty())
+                    continue;
+                String[] v = line.replace("\"\"", "").split("\\|");
+                if (v.length < 3)
+                    continue;
+
+                try {
+                    String caseIdStr = v[0].replace("\"", "").trim();
+                    if (caseIdStr.isEmpty())
+                        continue;
+                    Long caseId = Long.parseLong(caseIdStr);
+                    String custNo = v[1].replace("\"", "").trim();
+                    String tglSubmitStr = v[2].replace("\"", "").trim();
+
+                    // 1. Ambil order_id dari order_data berdasarkan case_id
+                    String sqlOrder = "SELECT id FROM order_data WHERE case_id = :caseId";
+                    MapSqlParameterSource orderParams = new MapSqlParameterSource("caseId", caseId);
+                    List<UUID> orderIds = namedParameterJdbcTemplate.query(sqlOrder, orderParams,
+                            (rs, rNum) -> UUID.fromString(rs.getString("id")));
+
+                    UUID orderId = orderIds.isEmpty() ? null : orderIds.get(0);
+
+                    // 2. Cek apakah data sudah ada di submitted_activities berdasarkan order_id /
+                    // cust_no
+                    boolean exists = false;
+                    if (orderId != null) {
+                        String sqlCheck = "SELECT COUNT(1) FROM submitted_activities WHERE order_id = :orderId";
+                        Integer count = namedParameterJdbcTemplate.queryForObject(sqlCheck,
+                                new MapSqlParameterSource("orderId", orderId), Integer.class);
+                        exists = (count != null && count > 0);
+                    } else {
+                        String sqlCheck = "SELECT COUNT(1) FROM submitted_activities WHERE cust_no = :custNo";
+                        Integer count = namedParameterJdbcTemplate.queryForObject(sqlCheck,
+                                new MapSqlParameterSource("custNo", custNo), Integer.class);
+                        exists = (count != null && count > 0);
+                    }
+
+                    if (!exists) {
+                        Date submitAt = null;
+                        if (!tglSubmitStr.isEmpty()) {
+                            try {
+                                submitAt = inputFormat.parse(tglSubmitStr);
+                            } catch (Exception ignore) {
+                            }
+                        }
+
+                        SubmittedActivities sa = new SubmittedActivities();
+                        sa.setId(UUID.randomUUID());
+                        sa.setOrderId(orderId);
+                        sa.setCustNo(custNo);
+                        sa.setSubmitAt(submitAt);
+                        sa.setCreatedAt(now);
+
+                        batch.add(sa);
+                    }
+                } catch (Exception e) {
+                    log.error("Error parsing row {}: {}", lineNum, e.getMessage());
+                }
+
+                if (batch.size() >= batchSize) {
+                    JdbcUtil.bulkInsert(namedParameterJdbcTemplate, batch, SubmittedActivities.class);
+                    log.info("Batch inserted {} records into submitted_activities", batch.size());
+                    batch.clear();
+                }
+            }
+
+            if (!batch.isEmpty()) {
+                JdbcUtil.bulkInsert(namedParameterJdbcTemplate, batch, SubmittedActivities.class);
+                log.info("Final batch inserted {} records into submitted_activities", batch.size());
+            }
+        }
     }
 }
