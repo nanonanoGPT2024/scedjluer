@@ -76,7 +76,7 @@ public class UploadController {
         return ResponseEntity.ok("File uploaded to auto folder successfully");
     }
 
-    @GetMapping("/triger-update")
+    @GetMapping("/trigger-update")
     public ResponseEntity<?> triggerUpdate() {
         autoUpdateService.triggerUpdate();
         return ResponseEntity.ok("Update triggered successfully in background");

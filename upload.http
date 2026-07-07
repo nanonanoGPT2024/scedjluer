@@ -35,8 +35,7 @@ Content-Type: text/csv
 
 
 ### 4. Trigger Auto Update (Manual Trigger)
-# Note the endpoint mapping spelling in the code: 'triger-update'
-GET {{baseUrl}}/api/v1/upload/triger-update
+GET {{baseUrl}}/api/v1/upload/trigger-update
 
 
 ### 5. Upload File to Update Folder
