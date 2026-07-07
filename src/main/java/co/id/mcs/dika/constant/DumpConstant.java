@@ -60,8 +60,8 @@ public class DumpConstant {
                 COALESCE(od.pic_fullname, '-')                                                  AS leadername,
                 CASE
                     WHEN od.business_category IS NULL OR od.business_category = 0
-                        THEN 'Unblocked'
-                    ELSE 'Blocked'
+                        THEN 'Blocked'
+                    ELSE 'Unblocked'
                 END                                                                             AS block_status,
                 COALESCE(od.status_ms, '-')                                                     AS pickup_status,
                 COALESCE(od.reason_ms, '-')                                                     AS pickup_reason,
