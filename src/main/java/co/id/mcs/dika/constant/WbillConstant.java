@@ -40,7 +40,7 @@ public class WbillConstant {
                     od.case_id                                                                  AS NoCase,
                 od.cust_no                                                                  AS CIS,
                 cp.name                                                                     AS NAME,
-                COALESCE(TO_CHAR(cp.tanggal_lahir, 'YYYY-MM-DD'), '0000-00-00')            AS DOB,
+                COALESCE(TO_CHAR(cp.tanggal_lahir, 'YYYY-MM-DD HH24:MI:SS'), '0000-00-00 00:00:00')            AS DOB,
                 CASE cp.jenis_kelamin
                     WHEN 'LAKI'      THEN 'M'
                     WHEN 'PEREMPUAN' THEN 'F'
@@ -72,10 +72,10 @@ public class WbillConstant {
                 od.agent_username                                                           AS Username,
                 od.agent_fullname                                                           AS TM_Name,
                 od.nik                                                                      AS TM_Code,
-                TO_CHAR(od.agree_date,          'YYYY-MM-DD')                               AS Agree_Date,
+                TO_CHAR(od.agree_date,          'YYYY-MM-DD HH24:MI:SS')                    AS Agree_Date,
                 TO_CHAR(od.agree_date,          'HH24:MI:SS')                               AS Agree_Time,
-                TO_CHAR(od.created_date,        'YYYY-MM-DD')                               AS Upload_Date,
-                TO_CHAR(odd.pickup_date_remark, 'YYYY-MM-DD')                               AS Tgl_PU,
+                TO_CHAR(od.created_date,        'YYYY-MM-DD HH24:MI:SS')                    AS Upload_Date,
+                TO_CHAR(odd.pickup_date_remark, 'YYYY-MM-DD HH24:MI:SS')                    AS Tgl_PU,
                 CONCAT(
                     CASE WHEN mcp.product = 'Credit Card' THEN 'CC'
                          WHEN mcp.product = 'Smartcash'   THEN 'SC'
